@@ -3,10 +3,10 @@ pillow
 numpy==1.26.4
 pandas
 
-# OpenCV: pakai headless di Linux (Streamlit Cloud), non-headless untuk OS lain (opsional)
+# OpenCV: headless di Linux (Cloud), non-headless di OS lain (opsional)
 opencv-python-headless==4.6.0.66; platform_system == "Linux"
 opencv-python==4.6.0.66; platform_system != "Linux"
 
-# Paddle
-paddlepaddle>=3.0.0
-paddleocr>=2.7.3
+# Paddle: pin versi yang stabil untuk PPStructure
+paddlepaddle==3.0.0
+paddleocr==2.7.0.3
