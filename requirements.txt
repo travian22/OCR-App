@@ -2,5 +2,15 @@ streamlit
 pillow
 numpy==1.26.4
 pandas
+
+# OpenCV HEADLESS untuk Linux (Streamlit Cloud)
+opencv-python-headless==4.6.0.66; platform_system == "Linux"
+opencv-contrib-python-headless==4.6.0.66; platform_system == "Linux"
+
+# (Opsional, untuk development non-Linux agar tetap bisa jalan)
+opencv-python==4.6.0.66; platform_system != "Linux"
+opencv-contrib-python==4.6.0.66; platform_system != "Linux"
+
+# Paddle
 paddlepaddle==3.0.0
 paddleocr==2.7.0.3
