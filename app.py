@@ -1,4 +1,4 @@
-# app.py
+# app.py — Streamlit + PaddleOCR PP-Structure (fix Cloud)
 import io, os, re, tempfile
 import numpy as np
 import pandas as pd
@@ -6,9 +6,7 @@ import cv2
 from PIL import Image
 import streamlit as st
 
-# =================
-# Konstanta bulan
-# =================
+# ========= Konstanta bulan =========
 MONTHS_STD = ["Jan","Peb","Mar","Apr","Mei","Jun","Jul","Ags","Sep","Okt","Nop","Des"]
 MONTH_MAP = {
     "jan":"Jan","jan.":"Jan",
@@ -25,9 +23,16 @@ MONTH_MAP = {
     "des":"Des","dec":"Des"
 }
 
-# =============================
-# Utility preprocessing & crop grid
-# =============================
+# ========= Helper PPStructure (kompatibel lintas versi) =========
+def _get_PPStructure():
+    try:
+        from paddleocr import PPStructure  # beberapa build mengekspor langsung
+        return PPStructure
+    except Exception:
+        from paddleocr.ppstructure import PPStructure  # fallback resmi
+        return PPStructure
+
+# ========= Preprocess & grid detection =========
 def deskew(img_bgr):
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.bitwise_not(gray)
@@ -87,9 +92,7 @@ def find_table_crops(img_bin):
     boxes.sort(key=lambda b: (b[1]//50, b[0]))
     return boxes
 
-# ========================
-# Parsing & reshape logic
-# ========================
+# ========= Parsing & reshape (baris bulan → baris tanggal) =========
 def to_float(x):
     if pd.isna(x): return np.nan
     s = str(x).strip().replace(",", ".")
@@ -97,59 +100,52 @@ def to_float(x):
     try: return float(s)
     except: return np.nan
 
-def standardize_month(colname):
-    key = str(colname).strip().lower().replace(" ", "").replace("-", "")
+def standardize_month(name):
+    key = str(name).strip().lower().replace(" ", "").replace("-", "")
     return MONTH_MAP.get(key)
 
 def reshape_from_month_row(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Input: df_raw (baris = bulan, kolom = tanggal)
+    Input: baris = bulan, kolom = tanggal
     Output: baris = tanggal (1..31), kolom = Jan..Des
     """
     if df_raw is None or df_raw.empty:
         return pd.DataFrame(columns=["Tanggal"] + MONTHS_STD)
 
     df = df_raw.copy()
-    # buang baris rata-rata jika ada di kolom pertama
-    df = df[~df.iloc[:,0].astype(str).str.lower().str.contains("rata")]
+    df = df[~df.iloc[:,0].astype(str).str.lower().str.contains("rata")]  # buang rata-rata
 
     # kolom pertama = label bulan
     months = []
     for v in df.iloc[:,0]:
-        std = standardize_month(str(v))
+        std = standardize_month(v)
         months.append(std if std else str(v))
     df.index = months
 
-    # buang kolom pertama (nama bulan); sisanya kolom tanggal
+    # sisanya = kolom tanggal
     df = df.drop(df.columns[0], axis=1)
-
-    # header kolom terkadang bukan int murni—paksa numerik
-    df.columns = pd.to_numeric(df.columns, errors="coerce")
+    df.columns = pd.to_numeric(df.columns, errors="coerce")  # jadikan 1..31
 
     # transpose → baris = tanggal, kolom = bulan
     df_t = df.T
     df_t.index.name = "Tanggal"
 
-    # konversi nilai ke float
     for c in df_t.columns:
         df_t[c] = df_t[c].map(to_float)
 
-    # pastikan semua kolom bulan ada dan urut
+    # pastikan semua bulan ada & urut
     for m in MONTHS_STD:
         if m not in df_t.columns:
             df_t[m] = np.nan
     df_t = df_t[MONTHS_STD]
 
-    # jadikan Tanggal sebagai kolom biasa
+    # jadikan tanggal kolom biasa + lengkapi 1..31
     df_t = df_t.reset_index()
-
-    # lengkapkan tanggal 1..31 meskipun kosong
     idx_full = pd.DataFrame({"Tanggal": list(range(1,32))})
     df_t = idx_full.merge(df_t, on="Tanggal", how="left")
     return df_t
 
 def merge_tanggal_bulan_tables(dfs):
-    """Gabungkan beberapa tabel hasil reshape (outer-by Tanggal, pilih non-NaN terbaru)."""
     if not dfs:
         return pd.DataFrame(columns=["Tanggal"] + MONTHS_STD)
     merged = dfs[0].copy()
@@ -162,24 +158,31 @@ def merge_tanggal_bulan_tables(dfs):
                 merged.drop(columns=[dup], inplace=True)
     merged = merged.sort_values("Tanggal")
     merged = merged[merged["Tanggal"].between(1,31)]
-    merged = merged[["Tanggal"] + MONTHS_STD].reset_index(drop=True)
-    return merged
+    return merged[["Tanggal"] + MONTHS_STD].reset_index(drop=True)
 
-# ============================
-# Paddle OCR + fallback logic
-# ============================
-def run_paddle_table_with_fallback(img_pil: Image.Image):
-    from paddleocr import PPStructure
-    img_bgr = cv2.cvtColor(np.array(img_pil.convert("RGB")), cv2.COLOR_RGB2BGR)
+# ========= Cache model & OCR =========
+@st.cache_resource
+def get_table_engine():
+    PPStructure = _get_PPStructure()
+    return PPStructure(layout=True, ocr=True, show_log=False)
+
+@st.cache_data(show_spinner=False)
+def ocr_table_bytes(img_bytes: bytes):
+    engine = get_table_engine()
+    img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+    # preprocessing
+    img_bgr = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
     img_bgr = deskew(img_bgr)
     img_bgr = upscale(img_bgr, 1.6)
     bin_img = preprocess_for_table(img_bgr)
 
+    # simpan sementara
     tmpdir = tempfile.mkdtemp()
     full_path = os.path.join(tmpdir, "full.png")
     cv2.imwrite(full_path, cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
 
-    engine = PPStructure(layout=True, ocr=True, show_log=False)
+    # jalankan PP-Structure (full image)
     res = engine(full_path)
     tables = [r for r in res if r.get("type") == "table"]
 
@@ -187,15 +190,18 @@ def run_paddle_table_with_fallback(img_pil: Image.Image):
     def parse_items(items):
         for t in items:
             html = t.get("res",{}).get("html") or t.get("html")
-            if html:
-                try:
-                    lst = pd.read_html(html)
-                    if lst:
-                        parsed.append(lst[0])
-                except Exception:
-                    pass
+            if not html: 
+                continue
+            try:
+                lst = pd.read_html(html)
+                if lst:
+                    parsed.append(lst[0])
+            except Exception:
+                pass
 
     parse_items(tables)
+
+    # fallback: crop grid kandidat jika kosong
     if not parsed:
         crops = find_table_crops(bin_img)
         for x,y,w,h in crops:
@@ -205,43 +211,46 @@ def run_paddle_table_with_fallback(img_pil: Image.Image):
             sub = engine(c_path)
             sub_tables = [r for r in sub if r.get("type") == "table"]
             parse_items(sub_tables)
+
     return parsed
 
-# =================
-# Helper tampilan df (kompatibel semua Streamlit)
-# =================
-def show_df(df):
-    try:
-        st.dataframe(df, use_container_width=True)
-    except TypeError:
-        st.dataframe(df)
-
-# =================
-# Streamlit UI logic
-# =================
-st.set_page_config(page_title="OCR ↔ Tabel (PP-Structure)", layout="wide")
-st.title("OCR Tabel → Tanggal × Bulan (Transpose)")
-st.caption("PaddleOCR PP-Structure; tampilkan tabel mentah & versi dibalik (baris=Tanggal, kolom=Jan–Des).")
+# ========= Streamlit UI =========
+st.set_page_config(page_title="OCR Tabel → Tanggal×Bulan", layout="wide")
+st.title("OCR Tabel → Tanggal × Bulan (PaddleOCR Table + Cache)")
 
 uploaded = st.file_uploader("Upload gambar tabel (.png/.jpg/.jpeg)", type=["png","jpg","jpeg"])
 if uploaded:
-    img = Image.open(uploaded).convert("RGB")
-    try:
-        st.image(img, caption="Gambar Masukan")
-    except TypeError:
-        # Streamlit lama tidak punya use_container_width pada st.image
-        st.image(img, caption="Gambar Masukan")
+    uploaded.seek(0)
+    img_bytes = uploaded.read()
+    st.image(Image.open(io.BytesIO(img_bytes)), caption="Gambar Masukan")
 
-    with st.spinner("Memindai dan ekstrak tabel..."):
-        raw_tables = run_paddle_table_with_fallback(img)
+    with st.spinner("Mendeteksi & mengekstrak tabel..."):
+        raw_tables = ocr_table_bytes(img_bytes)
 
     st.success(f"Terdeteksi {len(raw_tables)} tabel.")
 
     reshaped = []
-    for idx, tdf in enumerate(raw_tables, 1):
-        st.subheader(f"Tabel Mentah #{idx}")
-        show_df(tdf)
+    for i, tdf in enumerate(raw_tables, 1):
+        st.subheader(f"Tabel Mentah #{i}")
+        st.dataframe(tdf)
 
-        df_tb = reshape_from_month_row(tdf)
+        df_tb = reshape_from_month_row(tdf)  # baris = tanggal, kolom = bulan
         if not df_tb.empty:
             reshaped.append(df_tb)
+
+    if reshaped:
+        final = merge_tanggal_bulan_tables(reshaped)
+        st.subheader("Tabel hasil transpos (Tanggal × Bulan)")
+        st.dataframe(final)
+
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf) as writer:
+            final.to_excel(writer, index=False, sheet_name="Tanggal×Bulan")
+        st.download_button(
+            "Unduh Excel",
+            data=buf.getvalue(),
+            file_name="tanggal_x_bulan.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("Belum ada tabel yang bisa ditranspos. Coba crop area tabel lebih ketat atau gunakan gambar resolusi lebih tinggi.")
