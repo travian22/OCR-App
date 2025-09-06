@@ -1,5 +1,7 @@
 # Deteksi Teks & Ekstraksi Tabel dari Gambar
 
+[🌐 Demo Online](https://ocr-apps.streamlit.app/)
+
 Aplikasi ini menggunakan Streamlit untuk mendeteksi dan mengekstrak tabel dari gambar (format .png, .jpg, .jpeg) menggunakan PaddleOCR PP-Structure. Hasil ekstraksi ditampilkan dalam bentuk tabel mentah dan versi transposisi (baris = tanggal, kolom = bulan).
 
 ## Fitur
